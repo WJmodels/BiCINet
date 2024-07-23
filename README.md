@@ -22,5 +22,5 @@ password: bxym
 
 ## generate
 ```
-python main.py
+bash scripts/run.sh
 ```
