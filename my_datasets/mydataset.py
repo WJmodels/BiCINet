@@ -1,404 +1,560 @@
-import os
 import torch
-from datasets import load_dataset
-from torch.utils.data import DataLoader
-from my_datasets.my_data_collator import MyDataCollator_json, MyDataCollator_json_2
-import multiprocessing as mp
-import time
+from torch.utils.data import Dataset
+import json
+import random
+import ipdb
+from tqdm import tqdm
+from rdkit import Chem
+from rdkit.Chem import AllChem
+from rdkit import DataStructs
+import numpy as np
+from typing import Any, Callable, Dict, List, NewType, Optional
 
 USE_SMALL = False
 USE_RDKIT = False
-PRED_GRAPH = False 
 
-def parse_folder(folder, data_files=None, key=None):
-    if folder is None:
-        return
-    elif isinstance(folder, list):
-        tmp = folder
-    elif isinstance(folder, str):
-        if os.path.isdir(folder):
-            tmp = [os.path.join(
-                folder, i) for i in os.listdir(folder) if ".json" in i]
-        elif os.path.exists(folder):
-            tmp = [folder]
-        else:
-            raise
-    else:
-        raise
-    if data_files is not None and key is not None:
-        data_files[key] = tmp
-    else:
-        return tmp
+class MyDataset(Dataset):
+    def __init__(self, 
+                 args, 
+                 tokenizer=None, 
+                 data_dir=None,
+                 dataset=[],
+                 max_length=512, 
+                 input_name=["sub_smiles"],
+                 output_name=["smiles"],
+                 mlm_name=["sub_smiles"],
+                 phase="train",
+                 aug_nmr=True,
+                 debug=False):
 
-def prepare_dataset(train_folder,
-                    validation_folder,
-                    tokenizer,
-                    preprocessing_num_workers,
-                    overwrite_cache,
-                    per_device_train_batch_size,
-                    per_device_eval_batch_size,
-                    block_size=500,
-                    train_percent=90,
-                    load_cache=False,
-                    cache_path=None,
-                    cache_dir=None,
-                    use_QED_prob=0,
-                    use_molecular_formula_prob=0,
-                    use_molecular_weight_prob=0,
-                    use_logP_prob=0,
-                    use_SA_prob=0,
-                    use_class_prob=0,
-                    use_fragment_prob=0,
-                    use_sub_smiles=0.5,
-                    flag_dual=False,
-                    task_percent=0.5,
-                    use_encoder=False,
-                    aug_smiles=False,
-                    aug_subsmiles=False,
-                    pred_graph=False, 
-                    mode="reverse",
-                    ):
-    
-    if load_cache and os.path.exists(cache_path):
-        try:
-            tokenized_datasets = torch.load(cache_path)
-        except:
-            return prepare_dataset(train_folder,
-                                   validation_folder,
-                                   tokenizer,
-                                   preprocessing_num_workers,
-                                   overwrite_cache,
-                                   per_device_train_batch_size,
-                                   per_device_eval_batch_size,
-                                   block_size,
-                                   train_percent,
-                                   load_cache=False,
-                                   cache_path=None,
-                                   cache_dir=cache_dir,
-                                   use_QED_prob=use_QED_prob,
-                                   use_molecular_formula_prob=use_molecular_formula_prob,
-                                   use_molecular_weight_prob=use_molecular_weight_prob,
-                                   use_logP_prob=use_logP_prob,
-                                   use_SA_prob=use_SA_prob,
-                                   use_class_prob=use_class_prob,
-                                   use_fragment_prob=use_fragment_prob,
-                                   use_sub_smiles=use_sub_smiles,
-                                   flag_dual=flag_dual,
-                                   task_percent=task_percent,
-                                   use_encoder=use_encoder,
-                                   pred_graph=pred_graph,
-                                   )
-    else:
-        data_files = {}
-        parse_folder(train_folder, data_files, "train")
-        parse_folder(validation_folder, data_files, "validation")
-        
-        extension = data_files[list(data_files.keys())[0]][0].split(".")[-1]
-        if extension == "txt":
-            extension = "text"
-        
-        raw_datasets = load_dataset(extension,
-                                    data_files=data_files,
-                                    cache_dir=cache_dir
-                                    )
-        
-        '''
-        if "validation" not in raw_datasets.keys():
-            raw_datasets["validation"] = load_dataset(
-                extension,
-                data_files=data_files,
-                split=f"train[{train_percent}%:]")
-            raw_datasets["train"] = load_dataset(
-                extension,
-                data_files=data_files,
-                split=f"train[:{train_percent}%]")
-        '''
-            
-        column_names = raw_datasets[list(data_files.keys())[0]].column_names
-        # text_column_name = "text" if "text" in column_names else column_names[0]
-
-        def tokenize_function_json(examples):
-            result = {}
-            if "QED" in examples.keys() and len(examples["QED"]) != 0:
-                result["QED"] = examples["QED"]
-
-            if "molecular_formula" in examples.keys():
-                tmp = tokenizer(
-                    examples["molecular_formula"], max_length=block_size)
-                tmp["input_ids"] = [[181] + i[1:-1] + [182]
-                                    for i in tmp["input_ids"]]
-                result["molecular_formula_input_ids"] = tmp["input_ids"]
-                result["molecular_formula_attention_mask"] = tmp["attention_mask"]
-
-            if "molecular_weight" in examples.keys() and len(examples["molecular_weight"]) != 0:
-                result["molecular_weight"] = examples["molecular_weight"]
-
-            if "logP" in examples.keys() and len(examples["logP"]) != 0:
-                result["logP"] = examples["logP"]
-
-            if "SA" in examples.keys() and len(examples["SA"]) != 0:
-                result["SA"] = examples["SA"]
-                
-            if "class" in examples.keys():
-                # tmp = tokenizer(
-                #     examples["class"], max_length=block_size)
-                # tmp["input_ids"] = [[203] + i[1:-1] + [204]
-                #                     for i in tmp["input_ids"]]
-                # result["class_input_ids"] = tmp["input_ids"]
-                # result["class_attention_mask"] = tmp["attention_mask"]
-                
-               
-                result["class_type"] = examples["class"]
-                tmp = tokenizer.convert_tokens_to_ids(examples["class"])
-                class_input_ids = [[[202, i, 203]] for i in tmp]
-                class_attention_mask = [[[1 for i in range(len(class_input_ids[j][0]))]] for j in range(len(class_input_ids))]
-                result["class_input_ids"] = class_input_ids
-                result["class_attention_mask"] = class_attention_mask
-            
-            
-            if "fragments" in examples.keys():
-                result["fragments_input_ids"] = []
-                result["fragments_attention_mask"] = []
-                for item in examples["fragments"]:
-                    if len(item) == 0:
-                        tmp = {"input_ids": [], "attention_mask": []}
-                    else:
-                        if not USE_SMALL:
-                            tmp = tokenizer(item, max_length=block_size)
-                        else:
-                            tmp = tokenizer([item[0]], max_length=block_size)
-                        tmp["input_ids"] = [[183] + i[1:-1] + [184]
-                                            for i in tmp["input_ids"]]
-
-                    result["fragments_input_ids"].append(tmp["input_ids"])
-                    result["fragments_attention_mask"].append(tmp["attention_mask"])
-                    
-            if "sub_smiles" in examples.keys():
-                if USE_RDKIT:
-                    result["origin_sub_smiles"] = [item for item in examples["sub_smiles"]]
-                else:
-                    result["origin_sub_smiles"] = [item for item in examples["sub_smiles"]]
-                    result["sub_smiles_input_ids"] = []
-                    result["sub_smiles_attention_mask"] = []
-                    for item in examples["sub_smiles"]:
-                        if not USE_SMALL:
-                            tmp = tokenizer(item, max_length=block_size)
-                        else:
-                            # with pretrain
-                            tmp = tokenizer([item[0]], max_length=block_size)
-                        tmp["input_ids"] = [i[1:-1] for i in tmp["input_ids"]]
-                        tmp["attention_mask"] = [i[1:-1] for i in tmp["attention_mask"]]
-
-                        result["sub_smiles_input_ids"].append(tmp["input_ids"])
-                        result["sub_smiles_attention_mask"].append(tmp["attention_mask"])
-
-            if "smiles" in examples.keys():
-                if USE_RDKIT:
-                    result["origin_smiles"] = [item[0] for item in examples["smiles"]]
-                else:
-                    result["origin_smiles"] = [item[0] for item in examples["smiles"]]
-                    result["smiles_input_ids"] = []
-                    result["smiles_attention_mask"] = []
-                    
-                
-                    
-                    for item in examples["smiles"]:
-                        if not USE_SMALL:
-                            tmp = tokenizer(item, max_length=block_size)
-                        else:
-                            # with pretrain
-                            tmp = tokenizer([item[0]], max_length=block_size)
-                        tmp["input_ids"] = [[187] + i[1:-1] + [188] for i in tmp["input_ids"]]
-
-                        result["smiles_input_ids"].append(tmp["input_ids"])
-                        result["smiles_attention_mask"].append(tmp["attention_mask"])
-                        
-                        
-                
-            return result
-
-
-
-        if extension == "json":
-            tokenize_function = tokenize_function_json
-            data_collator_train = MyDataCollator_json_2(tokenizer=tokenizer,
-                                                        phase="train",
-                                                        use_QED_prob=use_QED_prob,
-                                                        use_molecular_formula_prob=use_molecular_formula_prob,
-                                                        use_molecular_weight_prob=use_molecular_weight_prob,
-                                                        use_logP_prob=use_logP_prob,
-                                                        use_SA_prob=use_SA_prob,
-                                                        use_class_prob=use_class_prob,
-                                                        use_fragment_prob=use_fragment_prob,
-                                                        use_sub_smiles=use_sub_smiles,
-                                                        flag_dual=flag_dual, 
-                                                        max_length=block_size,
-                                                        task_percent=task_percent,
-                                                        use_encoder=use_encoder,
-                                                        aug_smiles=aug_smiles,
-                                                        aug_subsmiles=aug_subsmiles,
-                                                        mode=mode, 
-                                                        pred_graph=pred_graph, 
-                                                        )
-          
-            data_collator_val = MyDataCollator_json_2(
-                                                    tokenizer=tokenizer, phase="val",
-                                                    use_QED_prob=use_QED_prob,
-                                                    use_molecular_formula_prob=use_molecular_formula_prob,
-                                                    use_molecular_weight_prob=use_molecular_weight_prob,
-                                                    use_logP_prob=use_logP_prob,
-                                                    use_SA_prob=use_SA_prob,
-                                                    use_class_prob=use_class_prob, #class
-                                                    use_fragment_prob=use_fragment_prob,
-                                                    use_sub_smiles=use_sub_smiles,
-                                                    max_length=block_size,
-                                                    mode=mode, 
-                                                    pred_graph=pred_graph, 
-                                                    )
-
-        elif extension == "text":
-            # do not upgrade any more
-            raise "this is not update anymore"
-            # tokenize_function = tokenize_function_text
-            # data_collator = MyDataCollator_text(tokenizer)
-
-        tokenized_datasets = raw_datasets.map(
-            tokenize_function,
-            batched=True,
-            num_proc=preprocessing_num_workers,
-            remove_columns=column_names,
-            load_from_cache_file=not overwrite_cache,
-            desc="Running tokenizer on dataset",
-        )
-
-        if cache_path is not None:
-            torch.save(tokenized_datasets, cache_path)
-
-    train_dataset = tokenized_datasets["train"] if train_folder is not None else None
-    eval_dataset = tokenized_datasets["validation"] if validation_folder is not None else None
-    # DataLoaders creation:
-
-    train_dataloader = DataLoader(
-        train_dataset,
-        shuffle=True,
-        collate_fn=data_collator_train,
-        batch_size=per_device_train_batch_size
-    ) if train_folder is not None else None
-
-    eval_dataloader = DataLoader(
-        eval_dataset,
-        collate_fn=data_collator_val,
-        batch_size=per_device_eval_batch_size
-    ) if validation_folder is not None else None
-
-    return train_dataset, eval_dataset, train_dataloader, eval_dataloader
-
-
-class mp_class():
-    def __init__(self, args, tokenizer, cache_size=2, num_files_used=1, pt_save_name=None) -> None:
-        super().__init__()
         self.args = args
         self.tokenizer = tokenizer
-        self.cache_size = cache_size+4
-        self.num_files_used = num_files_used
-        self.all_training_json = parse_folder(args.train_folder)
-        # self.all_training_json = self.all_training_json[3655:]
-        self.queue = mp.Queue(cache_size)
-        self.index = 0
-        self.lock = mp.Lock()
-        self.process = mp.Process(target=self.__loader, args=(self.queue,
-                                                              self.lock,
-                                                              self.all_training_json,
-                                                              num_files_used,
-                                                              self.tokenizer,
-                                                              self.args,))
-                                  
-        self.process.daemon = True
-        self.process.start()
-        assert pt_save_name is not None
-        self.save_name = pt_save_name
-    def next(self):
-        while(self.queue.qsize() < 1):
-                time.sleep(5)
-        # self.lock.acquire()
-        value = self.queue.get()
-        # self.lock.release()
-        if value is not None:
-            print(self.all_training_json[value[0]])
-        torch.save(value, self.save_name)
-        return value
+        self.data_dir = data_dir
+        self.original_data = dataset
+        self.max_length = max_length
+        self.debug = debug
+        self.phase = phase
+        self.aug_nmr = aug_nmr
+        self.input_name = input_name
+        self.output_name = output_name
+        self.mlm_name = mlm_name
+        self.get_kwargs(self.args)
+        if len(self.original_data)==0:
+            self.original_data = self.load_raw_data()
+        # self.data = self.process_raw_data()
+        
 
-    @staticmethod
-    def __loader(queue: mp.Queue, lock, all_training_json, num_files_used=1, tokenizer=None, args=None):
-        i = 0
-        while True:
-            if i == len(all_training_json):
-                lock.acquire()
-                queue.put(None)
-                lock.release()
-                return
-            if queue.qsize() < 3:
-                (_, _, train_dataloader, _) = prepare_dataset(train_folder=all_training_json[i:i+num_files_used],
-                                                              validation_folder=None,
-                                                              tokenizer=tokenizer,
-                                                              preprocessing_num_workers=args.preprocessing_num_workers,
-                                                              overwrite_cache=args.overwrite_cache,
-                                                              per_device_train_batch_size=args.per_device_train_batch_size,
-                                                              per_device_eval_batch_size=args.per_device_eval_batch_size,
-                                                              block_size=args.block_size,
-                                                              load_cache=False,
-                                                              cache_path=args.cache_path,
-                                                              cache_dir=args.cache_dir,
-                                                              use_fragment_prob=args.use_fragment_prob,
-                                                              use_molecular_weight_prob=args.use_molecular_weight_prob,
-                                                              use_logP_prob=args.use_logP_prob,
-                                                              use_class_prob=args.use_class_prob,
-                                                              use_SA_prob=args.use_SA_prob,
-                                                              use_molecular_formula_prob=args.use_molecular_formula_prob,
-                                                              use_QED_prob=args.use_QED_prob,
-                                                              use_sub_smiles=args.use_sub_smiles,
-                                                              flag_dual=args.flag_dual,
-                                                              task_percent=args.task_percent
-                                                              )
-                lock.acquire()
-                queue.put((i, train_dataloader))
-                i += 1
-                lock.release()
+        if self.phase != "train":
+            self.flag_dual = False
+            self.task_percent = 1
+            self.aug_smiles = False
+            self.aug_nmr = False
+            self.use_mlm = False
+            self.use_sim = False
+        
+        if self.aug_nmr:
+            self.min_1H_NMR_index = self.tokenizer.convert_tokens_to_ids(self.min_1H_NMR)
+            self.max_1H_NMR_index = self.tokenizer.convert_tokens_to_ids(self.max_1H_NMR)
+            self.min_13C_NMR_index = self.tokenizer.convert_tokens_to_ids(self.min_13C_NMR)
+            self.max_13C_NMR_index = self.tokenizer.convert_tokens_to_ids(self.max_13C_NMR)
+        
+    def get_kwargs(self, args):
+
+        self.use_sub_smiles_prob = getattr(args, "use_sub_smiles_prob", 0.0)
+        self.use_smiles_prob = getattr(args, "use_smiles_prob", 0.8)
+        self.use_fragment_prob = getattr(args, "use_fragment_prob", 0.0)
+        self.use_molecular_formula_prob = getattr(args, "use_molecular_formula_prob", 0.0)
+        self.use_1H_NMR_prob = getattr(args, "use_1H_NMR_prob", 0.0)
+        self.use_13C_NMR_prob = getattr(args, "use_13C_NMR_prob", 0.0)
+        self.use_enzyme_prob = getattr(args, "use_enzyme_prob", 0.0)
+        self.use_class_prob = getattr(args, "use_class_prob", 0.0)
+        self.use_COSY_prob = getattr(args, "use_COSY_prob", 0.0)
+        self.use_HMBC_prob = getattr(args, "use_HMBC_prob", 0.0)
+        self.aug_smiles = getattr(args, "aug_smiles", True)
+        
+        
+        ## 
+        self.flag_dual = getattr(args, "flag_dual", False)
+        self.task_percent = getattr(args, "task_percent", 1.0)
+        self.use_mlm = getattr(args, "use_mlm", False) 
+        
+        ## mode
+        self.mode = getattr(args, "mode", "forward") 
+        
+        self.use_sim = getattr(args, "use_sim", False) 
+    
+    def jitter(self, jitter_range: float = 2, precision: float=2):
+        jitter_value = np.random.uniform(-jitter_range, +jitter_range)
+        encode_jitter_value = int(jitter_value/precision)
+        return encode_jitter_value
+    
+        
+        
+    def load_raw_data(self):
+
+        original_data = []
+        with open(self.data_dir,"r") as f:
+            for line in f:
+                original_data.append(json.loads(line))
+        
+        return original_data
+    
+    def process_raw_data(self, examples):
+            
+        result = {}
+        if "molecular_formula" in examples.keys():
+            result["molecular_formula"] = examples["molecular_formula"]
+            result["molecular_formula_input_ids"] = [self.tokenizer.convert_tokens_to_ids("<molecular_formula>")] + \
+                                                    [self.tokenizer.convert_tokens_to_ids(i) for i in examples["molecular_formula"]] + \
+                                                    [self.tokenizer.convert_tokens_to_ids("</molecular_formula>")]
+            result["molecular_formula_attention_mask"] = [1 for _ in range(len(result["molecular_formula_input_ids"]))]
+            if self.debug:
+                assert len(result["molecular_formula_input_ids"]) == len(result["molecular_formula_input_ids"])
+        
+        ## List(List())
+        if "fragments" in examples.keys():
+            result["fragments"] = examples["fragments"]
+            result["fragments_input_ids"] = []
+            result["fragments_attention_mask"] = []
+            for item in examples["fragments"]:
+                tmp = {}
+                tmp["fragments_input_ids"] = [self.tokenizer.convert_tokens_to_ids("<fragment>")] + \
+                                            [self.tokenizer.convert_tokens_to_ids(i) for i in item] + \
+                                            [self.tokenizer.convert_tokens_to_ids("</fragment>")]
+                tmp["fragments_attention_mask"] = [1 for _ in range(len(tmp["fragments_input_ids"]))]
+
+                result["fragments_input_ids"].append(tmp["fragments_input_ids"])
+                result["fragments_attention_mask"].append(tmp["fragments_attention_mask"])
+                
+                if self.debug:
+                    assert len(tmp["fragments_input_ids"]) == len(tmp["fragments_attention_mask"])
+
+        ## List(List())
+        if "smiles" in examples.keys():
+            if self.aug_smiles is True:
+                result["smiles"] = examples["smiles"]
             else:
-                time.sleep(2)
+                ## canonical
+                result["smiles"] = [Chem.MolToSmiles(Chem.MolFromSmiles(examples["smiles"][0]))]
+                
+            result["smiles_input_ids"] = []
+            result["smiles_attention_mask"] = []
+            for item in result["smiles"]:
+                tmp = {}
+                tmp["smiles_input_ids"] = [self.tokenizer.convert_tokens_to_ids("<SMILES>")] + \
+                                            [self.tokenizer.convert_tokens_to_ids(i) for i in item] + \
+                                            [self.tokenizer.convert_tokens_to_ids("</SMILES>")]
+                tmp["smiles_attention_mask"] = [1 for _ in range(len(tmp["smiles_input_ids"]))]
 
-
-if __name__ == "__main__":
-
-    from transformers import GPT2Tokenizer
-    tokenizer = GPT2Tokenizer.from_pretrained(
-        "../models/tokenizer-smiles-roberta-1e")
-    path = "../../chem_data/data_pre/realc_t.json"
-    path = "../../chem_data/Compound_1e_txt/Compound1hh.txt"
-    (train_dataset,
-     eval_dataset,
-     train_dataloader,
-     eval_dataloader) = prepare_dataset(train_folder=path,
-                                        validation_folder=None,
-                                        tokenizer=tokenizer,
-                                        preprocessing_num_workers=4,
-                                        overwrite_cache=False,
-                                        per_device_train_batch_size=8,
-                                        per_device_eval_batch_size=8,
-                                        block_size=500,
-                                        load_cache=False,
-                                        cache_path=None)
-
-    for step, batch in enumerate(train_dataloader):
-        print(batch)
-        raise
-
+                result["smiles_input_ids"].append(tmp["smiles_input_ids"])
+                result["smiles_attention_mask"].append(tmp["smiles_attention_mask"])
+                
+                if self.debug:
+                    assert len(tmp["smiles_input_ids"]) == len(tmp["smiles_attention_mask"])
         
+        if "sub_smiles" in examples.keys():
+            result["origin_sub_smiles"] = [item for item in examples["sub_smiles"]]
+            result["sub_smiles_input_ids"] = []
+            result["sub_smiles_attention_mask"] = []
+            tmp = {}
+            for k, item in enumerate(examples["sub_smiles"]):
+                tmp["sub_smiles_input_ids"] = [self.tokenizer.convert_tokens_to_ids(i) for i in item]
+                tmp["sub_smiles_attention_mask"] = [1 for _ in range(len(tmp["sub_smiles_input_ids"]))]
+                
+                result["sub_smiles_input_ids"].extend(tmp["sub_smiles_input_ids"])
+                result["sub_smiles_attention_mask"].extend(tmp["sub_smiles_attention_mask"])
+                
+                if (k+1)!=len(examples["sub_smiles"]):
+                    result["sub_smiles_input_ids"].append(self.tokenizer.convert_tokens_to_ids("."))
+                    result["sub_smiles_attention_mask"].append(1)
+            
+            result["sub_smiles_input_ids"] = [self.tokenizer.convert_tokens_to_ids("<MATERIALS>")] +\
+                                                result["sub_smiles_input_ids"] +\
+                                            [self.tokenizer.convert_tokens_to_ids("</MATERIALS>")]
+            result["sub_smiles_attention_mask"] = [1] + result["sub_smiles_attention_mask"] + [1]
+                
+        if "class" in examples.keys():
+            result["class"] = examples["class"]
+            result["class_input_ids"] = [self.tokenizer.convert_tokens_to_ids("<CLASS>")] + \
+                                        [self.tokenizer.convert_tokens_to_ids(examples["class"])] + \
+                                        [self.tokenizer.convert_tokens_to_ids("</CLASS>")]
+            result["class_attention_mask"] = [1 for _ in range(len(result["class_input_ids"]))]
 
+            if self.debug:
+                assert len(result["class_input_ids"]) == len(result["class_attention_mask"])
+                
+        if "enzyme" in examples.keys():
+            result["enzyme"] = examples["enzyme"]
+            result["enzyme_input_ids"] = [self.tokenizer.convert_tokens_to_ids("<enzyme>")] + \
+                                            [self.tokenizer.convert_tokens_to_ids(i) for i in examples["enzyme"]] + \
+                                            [self.tokenizer.convert_tokens_to_ids("</enzyme>")]
+            result["enzyme_attention_mask"] = [1 for _ in range(len(result["enzyme_input_ids"]))]
+
+            if self.debug:
+                assert len(result["enzyme_input_ids"]) == len(result["enzyme_attention_mask"])
+        
+        
+        return result
+        
+    def __len__(self):
+        return len(self.original_data)
+
+    def __getitem__(self, idx):
+        if self.use_mlm is False:
+            return self.get_data(idx)
+        else:
+            return self.get_mlm_data(idx)
     
+    def get_data(self, idx):
+        item = self.process_raw_data(self.original_data[idx])
+        collect_dict = {}
         
+        smiles = None
+        sub_smiles = None
+        #enzyme_input_ids
+        if "enzyme_input_ids" in item.keys():
+            if "enzyme" in self.input_name or "enzyme" in self.output_name:
+                if (self.phase != "train" and self.use_enzyme_prob > 0) or random.random() < self.use_enzyme_prob:
+                    tmp_dict = {"input_ids": item["enzyme_input_ids"],
+                                "attention_mask": item["enzyme_attention_mask"]}
+                    collect_dict["enzyme"] = tmp_dict
+                    
+        #class_input_ids
+        if "class_input_ids" in item.keys():
+            if "class" in self.input_name or "class" in self.output_name:
+                if (self.phase != "train" and self.use_class_prob > 0) or random.random() < self.use_class_prob:
+                    tmp_dict = {"input_ids": item["class_input_ids"],
+                            "attention_mask": item["class_attention_mask"]}
+                    collect_dict["class"] = tmp_dict
         
+        #smiles
+        #item["smiles_input_ids"]:List[List[int]]
+        if "smiles_input_ids" in item.keys():
+            if ("smiles" in self.input_name) or ("smiles" in self.output_name):
+                if (self.phase != "train" and self.use_smiles_prob > 0) or random.random() < self.use_smiles_prob:
+                    rand_idx_smiles = random.randint(0, len(item["smiles_input_ids"])-1)
+                    tmp_dict = {"input_ids": item["smiles_input_ids"][rand_idx_smiles],
+                        "attention_mask": item["smiles_attention_mask"][rand_idx_smiles]}
+                    
+                    collect_dict["smiles"] = tmp_dict
+                    
+                    
+                    smiles = item["smiles"][0]
+                
+                else:
+                    len_sub_smiles = len(item["origin_sub_smiles"]) if "origin_sub_smiles" in item else 0
+                    #print(len_sub_smiles)
+                    if len_sub_smiles != 0:
+                        tmp_3 = {"input_ids": [],
+                                "attention_mask": []}
+                        tmp_3["input_ids"].append(200)
+                        tmp_3["attention_mask"].append(1)
+                        for idx_sub_smiles in range(len_sub_smiles):
+                            sub_smile_tmp = self.sub_smiles2token(
+                                item["origin_sub_smiles"][idx_sub_smiles], block_size=self.max_length)
+                            tmp_3["input_ids"].extend(sub_smile_tmp["input_ids"])
+                            tmp_3["attention_mask"].extend(sub_smile_tmp["attention_mask"])
+                            if idx_sub_smiles < len_sub_smiles-1:
+                                tmp_3["input_ids"].append(75)
+                                tmp_3["attention_mask"].append(1)
+                        tmp_3["input_ids"].append(201)
+                        tmp_3["attention_mask"].append(1)
+                    
+                    collect_dict["smiles"] = tmp_3
+                    
+                    smiles = ".".join(item["origin_sub_smiles"])
         
+        #fragments
+        #item["fragments_input_ids"]:List[List[int]]
+        if "fragments_input_ids" in item.keys():
+            if "fragments" in self.input_name or "fragments" in self.output_name:
+                if (self.phase != "train" and self.use_fragment_prob > 0) or random.random() < self.use_fragment_prob:
+                    rand_idx_fragments = random.randint(0, len(item["fragments_input_ids"])-1)
+                    tmp_dict = {"input_ids": item["fragments_input_ids"][rand_idx_fragments],
+                        "attention_mask": item["fragments_attention_mask"][rand_idx_fragments]}
+                    
+                    collect_dict["fragments"] = tmp_dict
+        
+        # molecular_formula
+        if "molecular_formula_input_ids" in item.keys():
+            if "molecular_formula" in self.input_name or "molecular_formula" in self.output_name:
+                if (self.phase != "train" and self.use_molecular_formula_prob > 0) or random.random() < self.use_molecular_formula_prob:
+                    tmp_dict = {"input_ids": item["molecular_formula_input_ids"],
+                            "attention_mask": item["molecular_formula_attention_mask"]}
+                    collect_dict["molecular_formula"] = tmp_dict
+        
+        # sub_smiles
+        if "sub_smiles_input_ids" in item.keys():
+            if "sub_smiles" in self.input_name or "sub_smiles" in self.output_name:
+                if (self.phase != "train" and self.use_sub_smiles_prob > 0) or random.random() < self.use_sub_smiles_prob:
+                    tmp_dict = {"input_ids": item["sub_smiles_input_ids"],
+                            "attention_mask": item["sub_smiles_attention_mask"]}
+                    collect_dict["sub_smiles"] = tmp_dict
+                    sub_smiles = ".".join(item["origin_sub_smiles"])
+
+
+
+        
+        input = {"input_ids": [],
+            "attention_mask": []}
+        output = {"input_ids": [],
+            "attention_mask": []}
+        
+        for key in self.input_name:
+            if key in collect_dict:
+                input["input_ids"].extend(collect_dict[key]["input_ids"])
+                input["attention_mask"].extend(collect_dict[key]["attention_mask"])
+        
+        for key in self.output_name:
+            if key in collect_dict:
+                output["input_ids"].extend(collect_dict[key]["input_ids"])
+                output["attention_mask"].extend(collect_dict[key]["attention_mask"])
+        
+        input = self.tokenizer.pad(input, return_tensors="pt")
+        output = self.tokenizer.pad(output, return_tensors="pt")
+        
+        """
+        if self.flag_dual:
+            flag_smiles_right = True if random.random() < 0.5 else False
+        else:
+            flag_smiles_right = True
+        """
+ 
+        if self.mode != "forward":
+            input, output = output, input
+        
+
+        if self.flag_dual and self.phase == "train":
+            if random.random() < 0.5:
+                input, output = output, input
+        
+        input["idx"] = idx
+        input["mlm"] = False
+        input["smiles"] = smiles
+        input["input_ids"] = input["input_ids"]
+        input["input_attention_mask"] = input["attention_mask"]
+        input["output_ids"] = output["input_ids"]
+        input["output_attention_mask"] = output["attention_mask"]
+        
+        if self.mode != "forward":
+            input["smiles"] = sub_smiles
+        
+        return input
     
+    def get_mlm_data(self, idx):
+        item = self.process_raw_data(self.original_data[idx])
+        collect_dict={}
+        smiles = None
+        
+        #smiles
+        #item["smiles_input_ids"]:List[List[int]]
+        # if "smiles_input_ids" in item.keys():
+        #     if "smiles" in self.mlm_name:
+        #         if (self.phase != "train" and self.use_smiles_prob > 0) or random.random() < self.use_smiles_prob:
+        #             rand_idx_smiles = random.randint(0, len(item["smiles_input_ids"])-1)
+        #             tmp_dict = {"input_ids": item["smiles_input_ids"][rand_idx_smiles],
+        #                 "attention_mask": item["smiles_attention_mask"][rand_idx_smiles]}
+                    
+        #             collect_dict["smiles"] = tmp_dict
+                    
+        #             
+        #             smiles = item["smiles"][0]
+        
+        # sub_smiles
+        if "sub_smiles_input_ids" in item.keys():
+            if "sub_smiles" in self.mlm_name:
+                if self.phase == "train":
+                    tmp_dict = {"input_ids": item["sub_smiles_input_ids"],
+                            "attention_mask": item["sub_smiles_attention_mask"]}
+                    collect_dict["sub_smiles"] = tmp_dict
+                    
+                    smiles = ".".join(item["origin_sub_smiles"])
+        
+        input = {"input_ids": [],
+                "attention_mask": []}
+        
+        for key in self.mlm_name:
+            if key in collect_dict:
+                input["input_ids"].extend(collect_dict[key]["input_ids"])
+                input["attention_mask"].extend(collect_dict[key]["attention_mask"])
 
+        input = self.tokenizer.pad(input, return_tensors="pt")
+        
+        input["idx"] = idx
+        input["mlm"] = True
+        input["smiles"] = smiles
+        input["output_ids"] = input["input_ids"].clone()
+        input["output_attention_mask"] = input["attention_mask"].clone()
+        input["input_ids"] = input["input_ids"]
+        input["input_attention_mask"] = input["attention_mask"]
+        
+        return input
+    
+    
+    
+    def my_torch_mask_tokens(self,
+                            inputs,
+                            tokenizer,
+                            special_tokens_mask: Optional[Any] = None,
+                            mlm_probability=0.15):
+        """
+        Prepare masked tokens inputs/labels for masked language modeling: 80% MASK, 10% random, 10% original.
+        """
+        # labels = inputs.clone()
+        if len(inputs.shape) == 1:
+            inputs = inputs.reshape(1, -1)
+        input_shape = inputs.shape
+        # We sample a few tokens in each sequence for MLM training (with probability `self.mlm_probability`)
+        probability_matrix = torch.full(input_shape, mlm_probability)
+        if special_tokens_mask is None:
+            special_tokens_mask = [
+                tokenizer.get_special_tokens_mask(val, already_has_special_tokens=True) for val in inputs.tolist()
+            ]
+            special_tokens_mask = torch.tensor(
+                special_tokens_mask, dtype=torch.bool)
+        else:
+            special_tokens_mask = special_tokens_mask.bool()
 
+        probability_matrix.masked_fill_(special_tokens_mask, value=0.0)
+        masked_indices = torch.bernoulli(probability_matrix).bool()
+        # labels[~masked_indices] = -100  # We only compute loss on masked tokens
+
+        # 80% of the time, we replace masked input tokens with tokenizer.mask_token ([MASK])
+        indices_replaced = torch.bernoulli(torch.full(input_shape, 0.8)).bool() & masked_indices
+        inputs[indices_replaced] = tokenizer.convert_tokens_to_ids(tokenizer.mask_token)
+
+        # 10% of the time, we replace masked input tokens with random word
+        indices_random = torch.bernoulli(torch.full(
+            input_shape, 0.5)).bool() & masked_indices & ~indices_replaced
+        random_words = torch.randint(
+            len(tokenizer), input_shape, dtype=torch.long)
+        inputs[indices_random] = random_words[indices_random]
+
+        # The rest of the time (10% of the time) we keep the masked input tokens unchanged
+        # return inputs, labels
+        if inputs.shape[0] == 1:
+            inputs = inputs.reshape(-1)
+        return inputs
+        
+
+    def collate_fn(self, batch):
+                
+       
+        input_max_length = 0
+        output_max_length = 0
+        for temp in batch:
+            input_max_length = max(len(temp["input_ids"]), input_max_length)
+            output_max_length = max(len(temp["output_ids"]), output_max_length)
+        input_max_length = min(input_max_length, self.max_length)
+        output_max_length = min(output_max_length, self.max_length)
+        
+        idx_list = []
+        mlm_list = []
+        smiles_list = []
+        input_ids_list = []
+        input_attention_mask_list = []
+        output_ids_list = []
+        padding_num = self.tokenizer.convert_tokens_to_ids("<pad>")
+        for _, temp in enumerate(batch):
+            if "idx" in temp:
+                idx_list.append(temp["idx"])
+            if "smiles" in temp:
+                smiles_list.append(temp["smiles"])
+            mlm = temp["mlm"] if "mlm" in temp else False
+            if mlm:
+                mlm_list.append(_)
+            temp_input_ids = temp["input_ids"][: input_max_length]
+            temp_attention_mask = temp["attention_mask"][: input_max_length]
+            temp_output_ids = temp["output_ids"][: output_max_length]
+            if temp_input_ids.shape[-1] < input_max_length:
+                temp_input_ids = torch.cat([temp_input_ids, 
+                                    torch.ones(input_max_length-temp_input_ids.shape[0]).long()*padding_num])
+                temp_attention_mask = torch.cat([temp_attention_mask, 
+                                    torch.zeros(input_max_length-temp_attention_mask.shape[0])*0])
+            
+            input_ids_list.append(temp_input_ids)
+            input_attention_mask_list.append(temp_attention_mask)
+            
+            if output_max_length > 0:
+                if temp_output_ids.shape[-1] < output_max_length:
+                    temp_output_ids = torch.cat([temp_output_ids, 
+                                            torch.ones(output_max_length-temp_output_ids.shape[0])*padding_num])
+
+                output_ids_list.append(temp_output_ids)
+            
+        input = {}
+        input["input_ids"] = torch.stack(input_ids_list, dim=0).long()
+        input["attention_mask"] = torch.stack(input_attention_mask_list, dim=0).long()
+        
+       
+        if len(output_ids_list)>0:
+            output_ids = torch.stack(output_ids_list, dim=0).long()
+            input["labels"] = output_ids[:, 1:].clone()
+            input["decoder_input_ids"] = output_ids[:, :-1].clone()
+        
+            if len(mlm_list)>0:
+                input["input_ids"][mlm_list] = self.my_torch_mask_tokens(input["input_ids"][mlm_list], self.tokenizer)
+                input["decoder_input_ids"][mlm_list] = self.my_torch_mask_tokens(input["decoder_input_ids"][mlm_list], self.tokenizer)
+        
+     
+        if self.phase == "train":
+            if random.random() < self.task_percent:
+                self.use_mlm = False
+            else:
+                self.use_mlm = True
+        else:
+            if self.use_mlm == True:
+                self.use_mlm = False
+            
+        if self.use_sim and len(smiles_list)>0:
+            input["sim_matrix"] = self.similarity_computation(smiles_list)
+        
+        return idx_list, smiles_list, input
+    
+    def similarity_computation(self, smiles_list):
+        similarity_matrix = torch.zeros(len(smiles_list), len(smiles_list))
+        mols_list = [Chem.MolFromSmiles(smiles) for smiles in smiles_list]
+        fps_list = [AllChem.GetMorganFingerprint(mol, 2, useChirality=True) for mol in mols_list]
+        
+        for i in range(len(smiles_list)):
+            similarity_matrix[i][i] = 1
+            for j in range(i+1, len(smiles_list)):
+                try:
+                    similarity = DataStructs.TanimotoSimilarity(fps_list[i], fps_list[j])
+                    similarity_matrix[i][j] = similarity
+                    similarity_matrix[j][i] = similarity
+                except Exception as e:
+                    print(e)
+                    print("error")
+        
+        return similarity_matrix
+    
+    def sub_smiles2token(self, smile_string, block_size=512):
+        smile_string_tmp = smile_string
+        if self.phase == "train":
+            old_mol = Chem.MolFromSmiles(smile_string)
+            if old_mol is not None:
+                smile_string_tmp2 = self.get_new_smiles(old_mol)
+                if smile_string_tmp2 is not None:
+                    smile_string_tmp = smile_string_tmp2
+
+        tmp = self.tokenizer([smile_string_tmp], max_length=block_size)
+        tmp["input_ids"] = [i[1:-1] for i in tmp["input_ids"]]
+        tmp["attention_mask"] = [i[1:-1] for i in tmp["attention_mask"]]
+        tmp["input_ids"] = tmp["input_ids"][0]
+        tmp["attention_mask"] = tmp["attention_mask"][0]
+        return tmp
+    
+    def get_new_smiles(self, old_mol):
+        len_mol = old_mol.GetNumAtoms()
+        li = []
+        for index in range(len_mol):
+            try:
+                new_smiles = Chem.MolToSmiles(old_mol, rootedAtAtom=index)
+                li.append(new_smiles)
+            except:
+                pass
+        if len(li) >= 1:
+            return random.choice(li)
+        else:
+            return None
