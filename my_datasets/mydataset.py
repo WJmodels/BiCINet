@@ -5,7 +5,6 @@ from torch.utils.data import DataLoader
 from my_datasets.my_data_collator import MyDataCollator_json, MyDataCollator_json_2
 import multiprocessing as mp
 import time
-#import ipdb
 
 USE_SMALL = False
 USE_RDKIT = False
@@ -23,7 +22,6 @@ def parse_folder(folder, data_files=None, key=None):
         elif os.path.exists(folder):
             tmp = [folder]
         else:
-            #ipdb.set_trace()
             raise
     else:
         raise
@@ -120,8 +118,6 @@ def prepare_dataset(train_folder,
         # text_column_name = "text" if "text" in column_names else column_names[0]
 
         def tokenize_function_json(examples):
-            # import ipdb
-            # ipdb.set_trace()
             result = {}
             if "QED" in examples.keys() and len(examples["QED"]) != 0:
                 result["QED"] = examples["QED"]
@@ -218,46 +214,6 @@ def prepare_dataset(train_folder,
                         result["smiles_attention_mask"].append(tmp["attention_mask"])
                         
                         
-            
-            if "13C_NMR" in examples.keys():
-                result["13C_NMR"] = examples["13C_NMR"]
-                tmp = [tokenizer.convert_tokens_to_ids(examples["13C_NMR"][_]) for _ in range(len(examples["13C_NMR"]))] ##List(List())
-                C_NMR_input_ids = [[[tokenizer.convert_tokens_to_ids("<13C_NMR>")] + i+ [tokenizer.convert_tokens_to_ids("</13C_NMR>")]] for i in tmp] ##List(List(List()))
-                C_NMR_attention_mask = [[[1 for i in range(len(C_NMR_input_ids[j][0]))]] for j in range(len(C_NMR_input_ids))]
-                # ipdb.set_trace()
-                # print("C_NMR",torch.tensor(C_NMR_input_ids).shape, torch.tensor(C_NMR_attention_mask).shape)
-                result["13C_NMR_input_ids"] = C_NMR_input_ids
-                result["13C_NMR_attention_mask"] = C_NMR_attention_mask
-                # import ipdb
-                # ipdb.set_trace()
-            
-            if "1H_NMR" in examples.keys():
-                result["1H_NMR"] = examples["1H_NMR"]
-                tmp = [tokenizer.convert_tokens_to_ids(examples["1H_NMR"][_]) for _ in range(len(examples["1H_NMR"]))]
-                H_NMR_input_ids = [[[tokenizer.convert_tokens_to_ids("<1H_NMR>")]+ i + [tokenizer.convert_tokens_to_ids("</1H_NMR>")]] for i in tmp]
-                H_NMR_attention_mask = [[[1 for i in range(len(H_NMR_input_ids[j][0]))]] for j in range(len(H_NMR_input_ids))]
-                # print("H_NMR",torch.tensor(H_NMR_input_ids).shape, torch.tensor(H_NMR_attention_mask).shape)
-                result["1H_NMR_input_ids"] = H_NMR_input_ids
-                result["1H_NMR_attention_mask"] = H_NMR_attention_mask
-                # import ipdb
-                # ipdb.set_trace()
-            
-            if "COSY" in examples.keys():
-                result["COSY"] = examples["COSY"]
-                tmp = []
-                for _ in range(len(examples["COSY"])):
-                    tmptmp = []
-                    for __ in examples["COSY"][_]:
-                        tmptmp.extend(tokenizer.convert_tokens_to_ids(__))
-                    tmp.append(tmptmp)
-                
-                COSY_input_ids = [[[tokenizer.convert_tokens_to_ids("<COSY>")] + i + [tokenizer.convert_tokens_to_ids("</COSY>")]] for i in tmp]
-                COSY_attention_mask = [[[1 for i in range(len(COSY_input_ids[j][0]))]] for j in range(len(COSY_input_ids))]
-                # print("COSY",torch.tensor(COSY_input_ids).shape, torch.tensor(COSY_attention_mask).shape)
-                result["COSY_input_ids"] = COSY_input_ids
-                result["COSY_attention_mask"] = COSY_attention_mask
-                # import ipdb
-                # ipdb.set_trace()
                 
             return result
 
