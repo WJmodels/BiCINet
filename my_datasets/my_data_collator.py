@@ -9,7 +9,6 @@ from rdkit import Chem
 import random
 from typing import Any, Union, List, Set
 USE_RDKIT = False
-import ipdb
 import torch.nn.functional as F
 
 
@@ -144,8 +143,6 @@ class MyDataCollator_json(object):
         output = {"input_ids": [],
                 "attention_mask": []}
         for item in examples:
-            import ipdb
-            ipdb.set_trace()
             # print(item.keys())
             if self.phase == "train":
                 rand_idx_smiles = random.randint(
@@ -355,8 +352,6 @@ class MyDataCollator_json_2(object):
             SA_tensor_list = []
 
         for item in examples:
-            # import ipdb
-            # ipdb.set_trace()
             # if "class_type" in item:
             #     class_type_list.append(item["class_type"])
             shuffle_list = []
@@ -533,8 +528,6 @@ class MyDataCollator_json_2(object):
             if "molecular_formula_input_ids" in item.keys():
                 if (self.phase == "val" and self.use_molecular_formula_prob > 0) or random.random() < self.use_molecular_formula_prob:
                     if len(item["molecular_formula_input_ids"]) > 2:
-                        # import ipdb
-                        # ipdb.set_trace()
                         tmp_2["input_ids"].extend(item["molecular_formula_input_ids"])
                         tmp_2["attention_mask"].extend([1 for _ in item["molecular_formula_input_ids"]])
                         # tmp = {"input_ids": item["molecular_formula_input_ids"],
@@ -691,9 +684,6 @@ class MyDataCollator_json_2(object):
         #     edges_indics = torch.cat(edges_indics_list,dim=0)
         #     input['graph_indics'] = graph_indics
         #     input['edges_indics'] = edges_indics
-        
-        import ipdb
-        ipdb.set_trace()
             
         return input
     
